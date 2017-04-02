@@ -14,10 +14,8 @@ limitations under the License.
 
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <EEPROM.h>
 #include <PubSubClient.h>
-
-#define MAGIC_BYTES_CONFIGURED 1455243984 //If this value is saved in the EEPROM, we know it contains proper configuration instead of random garbage;
+#include <FS.h>
 
 #define LEN_SSID 32
 #define LEN_WIFI_PASSWD 32
@@ -29,13 +27,13 @@ limitations under the License.
 const char *ap_ssid = "ESP8266Test";
 const char *ap_passwd = "nilpferd";
 
+const char *config_filename = "logger_config";
+
 ESP8266WebServer server ( 80 );
 WiFiClient wifiClient;
 PubSubClient pubSubClient(wifiClient);
 
 String mqttClientId;
-
-u32 magicBytes;
 
 struct {
   char ssid[LEN_SSID + 1];
@@ -49,26 +47,35 @@ struct {
   u32 measurement_delay;
 } config;
 
-void setup() {
-  Serial.begin(115200);
-  EEPROM.begin(sizeof(magicBytes) + sizeof(config));
-  delay(10);
-  
-  EEPROM.get(0, magicBytes);
+bool configured;
 
-  if (magicBytes == MAGIC_BYTES_CONFIGURED) {
-    EEPROM.get(sizeof(magicBytes), config);
+void setup() {
+  File configFile;
+  
+  Serial.begin(115200); 
+  SPIFFS.begin();
+  delay(10);
+
+  WiFi.persistent(false);
+
+  configFile = SPIFFS.open(config_filename, "r");
+
+  if (configFile) {
+    configFile.readBytes((char*)&config, sizeof(config));
+    configFile.close();
+    configured = true;
     connectToAp(config.ssid, config.wifi_passwd);
     pubSubClient.setServer(config.mqtt_host, config.mqtt_port);
     mqttClientId = getMqttClientId();
   } else {
+    configured = false;
     startAP(ap_ssid, ap_passwd);
     startConfigServer();  
   }
 }
 
 void loop() {
-  if (magicBytes == MAGIC_BYTES_CONFIGURED) {
+  if (configured) {
     logValue(analogRead(config.measurement_pin));
     delay(config.measurement_delay);
   } else {
@@ -93,6 +100,8 @@ void startConfigServer() {
 }
 
 void handleRoot() {
+  File configFile;
+  
   switch (server.method()) {
     case HTTP_GET:
       server.send(200, "text/html",
@@ -209,10 +218,9 @@ void handleRoot() {
         config.measurement_pin = server.arg("measurement_pin").toInt();
         config.measurement_delay = server.arg("measurement_delay").toInt();
 
-        magicBytes = MAGIC_BYTES_CONFIGURED;
-        EEPROM.put(0, magicBytes);
-        EEPROM.put(sizeof(magicBytes), config);
-        EEPROM.commit();
+        configFile = SPIFFS.open(config_filename, "w");
+        configFile.write((u8*)&config, sizeof(config));
+        configFile.close();
 
         server.send(200, "text/html",
 "<html>\
